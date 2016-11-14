@@ -12,28 +12,51 @@ module Logs = (val Logs.src_log src : Logs.LOG)
 let create_flags = Fsevents.CreateFlags.detailed_interactive
 let run_loop_mode = Cf.RunLoop.Mode.Default
 
+let runloops = ref []
+let watchers = ref []
+let last_event = ref Fsevents.EventId.Now
 let listen dir fn =
-  let watcher = Fsevents_lwt.create 0. create_flags [dir] in
+  let since = !last_event in
+  let watcher = Fsevents_lwt.create ~since 0. create_flags [dir] in
   let stream = Fsevents_lwt.stream watcher in
   let event_stream = Fsevents_lwt.event_stream watcher in
   let path_of_event { Fsevents_lwt.path; _ } = path in
+  let id_of_event { Fsevents_lwt.id; _ } = Fsevents.EventId.to_uint64 id in
   let iter () = Lwt_stream.iter_s (fun e ->
       let path = path_of_event e in
-      Logs.debug (fun l -> l "fsevents: %s" path);
-      fn @@ path
+      let id = id_of_event e in
+      last_event := Fsevents.EventId.Since id;
+      let { Fsevents.EventFlags.history_done; must_scan_subdirs; _ } =
+        e.Fsevents_lwt.flags
+      in
+      match must_scan_subdirs, history_done with
+      | None, true -> Lwt.return_unit
+      | _ ->
+          Logs.debug (fun l -> l "fsevents: %d %s %s"
+                         (Unsigned.UInt64.to_int id) path
+                         (Fsevents.EventFlags.to_string_one_line e.Fsevents_lwt.flags)
+                     );
+          fn @@ path
     ) stream
   in
   Cf_lwt.RunLoop.run_thread (fun runloop ->
       Fsevents.schedule_with_run_loop event_stream runloop run_loop_mode;
       if not (Fsevents.start event_stream)
       then prerr_endline "failed to start FSEvents stream")
-  >|= fun _scheduler ->
+  >|= fun runloop ->
   let stop_iter = Irmin_watcher_core.stoppable iter in
   let stop_scheduler () =
-    (* Fsevents_lwt.flush watcher >>= fun () ->*)
+    watchers := watcher :: !watchers;
+    runloops := runloop :: !runloops;
     Fsevents_lwt.stop watcher;
     Fsevents_lwt.invalidate watcher;
-    Fsevents_lwt.release watcher
+    Lwt.async (fun () ->
+      Lwt_unix.sleep 5.
+      >>= fun () ->
+      Fsevents_lwt.release watcher;
+      Cf.RunLoop.stop runloop;
+      Lwt.return_unit
+    )
   in
   fun () ->
     stop_iter ();

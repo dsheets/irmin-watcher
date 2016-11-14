@@ -31,22 +31,28 @@ let write f d =
   output_string oc d;
   close_out oc
 
+let iteration = ref 0
 let poll ~fs () =
   let events = ref [] in
   let c = Lwt_condition.create () in
   Array.iter (fun (k, v) -> write k v) fs;
+  prerr_endline "after array iter write";
   Irmin_watcher.hook 0 tmpdir (fun x ->
+    prerr_endline "in irmin watcher hook";
       events := x :: !events;
       Lwt_condition.broadcast c x;
       Lwt.return_unit
-    ) >>= fun u ->
-  write "foo" "foo";
+  ) >>= fun u ->
+  prerr_endline "before write foo";
+  write "foo" ("foo"^string_of_int !iteration);
   Lwt_condition.wait c >>= fun _ ->
   Alcotest.(check (slist string String.compare)) "foo" ["foo"] !events;
-  write "bar" "bar";
+  write "bar" ("bar"^string_of_int !iteration);
   Lwt_condition.wait c >>= fun _ ->
   Alcotest.(check (slist string String.compare)) "bar" ["foo";"bar"] !events;
+  prerr_endline "after bar check";
   u ();
+  prerr_endline "after poll cleanup";
   Lwt.return_unit
 
 let random_letter () = Char.(chr @@ code 'a' + Random.int 26)
@@ -66,8 +72,10 @@ let random_polls () =
   let rec aux = function
   | 0 -> Lwt.return_unit
   | i ->
+      prerr_endline ("random "^string_of_int i);
       let fs = Array.init (i * 1000) (fun i -> random_path 4, string_of_int i) in
       poll ~fs () >>= fun () ->
+      incr iteration;
       aux (i-1)
   in
   aux 2
